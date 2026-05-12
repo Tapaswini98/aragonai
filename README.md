@@ -2,6 +2,13 @@
 
 > A full-stack image ingestion system that validates, processes, and stores profile images with AI-powered quality checks.
 
+## Demo
+
+| # | Video | Description |
+|---|---|---|
+| 1 | [![Part 1](https://img.shields.io/badge/Loom-Part%201-purple?logo=loom)](https://www.loom.com/share/e66600fcaf5a431e86f611ff74c86353) | Project overview & architecture walkthrough & Demo|
+| 2 | [![Part 2](https://img.shields.io/badge/Loom-Part%202-purple?logo=loom)](https://www.loom.com/share/8a8dfa1f77f64b2393f9b6b3088714ed) | Bulk upload & validation pipeline demo |
+
 ---
 
 ## Table of Contents
@@ -21,20 +28,23 @@
 
 ## What Was Built
 
-An end-to-end image upload pipeline for profile photos. Users drag-and-drop images via a Next.js UI; the NestJS backend runs them through a multi-stage validation pipeline (format, resolution, blur, face detection, duplicate check) before persisting accepted images to AWS S3 and rejected ones to MongoDB with a human-readable reason.
+An end-to-end **bulk** image upload pipeline for profile photos. Users drag-and-drop up to 50 images at once via a Next.js UI; the NestJS backend runs each through a multi-stage validation pipeline (format, resolution, blur, duplicate check, face detection) before persisting accepted images to AWS S3 and all metadata to MongoDB with a human-readable rejection reason.
 
 ### Core Features
 
 | Feature | Detail |
 |---|---|
+| Bulk upload | Up to 50 images in a single request (`POST /images/upload-bulk`) |
 | Format validation | HEIC, PNG, JPEG only; HEIC auto-converted to JPEG |
 | Resolution check | Minimum 200×200 pixels |
 | Blur detection | Pixel standard-deviation threshold via Sharp |
 | Perceptual hashing | 8×8 average hash for similarity comparison |
 | Duplicate prevention | Hamming distance < 10 → rejected as "too similar" |
-| Face validation | AWS Rekognition: exactly one face, large enough bounding box |
+| Face validation | AWS Rekognition: exactly one face required, sufficient bounding box size |
+| Clean S3 storage | Face check runs **before** S3 upload — rejected images never stored |
 | Persistent storage | AWS S3 for accepted images; MongoDB for all metadata |
-| Status transparency | UI splits images into Accepted / Rejected columns with reasons |
+| Per-image feedback | UI shows per-card status: Ready → Uploading → Saved to S3 / Rejected with reason |
+| Status transparency | UI splits images into Accepted / Rejected grids with exact reasons |
 
 ---
 
@@ -56,7 +66,9 @@ An end-to-end image upload pipeline for profile photos. Users drag-and-drop imag
 │                                                                     │
 │   ┌──────────────────────────────────────────────────────────────┐ │
 │   │                  ImagesController                            │ │
-│   │  POST /images/upload  GET /images  GET /images/:id  DELETE  │ │
+│   │  POST /images/upload  POST /images/upload-bulk              │ │
+│   │  GET /images  GET /images/accepted  GET /images/rejected    │ │
+│   │  GET /images/:id  DELETE /images/:id                       │ │
 │   └──────────────────────────┬───────────────────────────────────┘ │
 │                              │                                      │
 │   ┌──────────────────────────▼───────────────────────────────────┐ │
@@ -131,21 +143,23 @@ File arrives via multipart/form-data
                           │ ✓
                           ▼
 ┌─────────────────────────────────────────────────────┐
-│  Step 6 — S3 Upload                                 │
-│  Key pattern: images/{timestamp}-{safe-filename}    │
-│  ✗ S3 error → REJECTED with storage error message  │
+│  Step 6 — AWS Rekognition Face Detection            │
+│  Runs on raw buffer BEFORE S3 upload                │
+│  (rejected images never stored in S3)               │
+│  Rules:                                             │
+│    • 0 faces   → REJECTED: "No face detected"       │
+│    • 2+ faces  → REJECTED: "Multiple faces (N)"     │
+│    • Face area < 5% → "Face too small"              │
+│  Uses eu-west-1 (Rekognition not in eu-north-1)     │
+│  ✗ Rekognition error → REJECTED (hard fail)         │
 └─────────────────────────┬───────────────────────────┘
                           │ ✓
                           ▼
 ┌─────────────────────────────────────────────────────┐
-│  Step 7 — AWS Rekognition Face Detection            │
-│  Checks the S3 object directly (no re-upload)       │
-│  Rules:                                             │
-│    • 0 faces   → REJECTED: "No face detected"       │
-│    • 2+ faces  → REJECTED: "Multiple faces"         │
-│    • Face area < 5% of image → "Face too small"     │
-│  Graceful degradation: if Rekognition is down,      │
-│  the image passes (availability > perfection)       │
+│  Step 7 — S3 Upload                                 │
+│  Key pattern: images/{timestamp}-{safe-filename}    │
+│  Only images that passed face check reach here      │
+│  ✗ S3 error → REJECTED with storage error message  │
 └─────────────────────────┬───────────────────────────┘
                           │ ✓
                           ▼
@@ -203,11 +217,11 @@ Tradeoff: heic-convert is slower than native image libraries (up to ~1–2 secon
 
 ### Face Detection — AWS Rekognition
 
-Rekognition's `DetectFaces` API returns bounding boxes and confidence scores. The key design decision was to call it **after** the S3 upload (Step 7) rather than uploading the image bytes directly to the Rekognition API (which supports `Image.Bytes`). This avoids double-transferring the image buffer over the network and lets Rekognition pull directly from S3.
+Rekognition's `DetectFaces` API returns bounding boxes and confidence scores. The key design decision was to call it **before** the S3 upload (Step 6) using `Image.Bytes` — sending the raw buffer directly to Rekognition. This means rejected images never reach S3, saving storage costs and keeping the bucket clean.
 
-Tradeoff: If the S3 upload succeeds but Rekognition rejects the image, the orphaned S3 object is never cleaned up. A production system would need a cleanup job (S3 lifecycle rule or a background task) to delete these objects.
+Rekognition is not available in `eu-north-1` (Stockholm) so it uses a dedicated `AWS_REKOGNITION_REGION=eu-west-1` (Ireland) — the closest supported EU region — while S3 remains in `eu-north-1` where the bucket is.
 
-The service has **graceful degradation**: if Rekognition is unavailable (bad credentials, network partition), the image passes. This prioritises availability over perfection — a useful tradeoff for a demo / non-safety-critical path.
+The service **hard-fails** on Rekognition errors (no silent pass-through) — ensuring multi-face images are never accidentally accepted due to a misconfiguration.
 
 ### Duplicate Detection — Perceptual Hashing
 
@@ -237,11 +251,13 @@ Tailwind CSS v4 with the new CSS-first configuration keeps styles co-located wit
 
 | Decision | Chosen approach | Alternative | Reason |
 |---|---|---|---|
+| Upload mode | Bulk (`POST /images/upload-bulk`, up to 50 files) | One request per file | Single HTTP round-trip; `Promise.all` parallelises all pipeline steps |
 | Where to validate | Server-side (authoritative) + client-side (UX) | Server only | Client check gives instant feedback; server check ensures correctness regardless of client |
 | Blur detection | Pixel stdev of grayscale channel | Laplacian variance | Stdev is simpler and fast via Sharp's built-in stats; Laplacian is more accurate but requires convolution |
-| Face detection timing | After S3 upload | Before (using Bytes API) | Avoids double network transfer; Rekognition pulls from S3 directly |
+| Face detection timing | **Before** S3 upload (using `Image.Bytes`) | After S3 upload | Rejected images never stored in S3; saves cost and keeps bucket clean |
+| Rekognition region | `eu-west-1` (separate env var) | Same as S3 region | Rekognition not available in `eu-north-1`; S3 and Rekognition can use different regions |
 | Error handling for S3 failures | Persist as REJECTED with reason | Throw 500 | Caller always gets a structured response; no silent failures |
-| Rekognition unavailability | Graceful pass-through | Hard fail | Availability > perfection for a demo; prevents external dependency blocking uploads |
+| Rekognition unavailability | Hard fail (return rejection reason) | Graceful pass-through | Ensures multi-face images are never accidentally accepted |
 | Similarity threshold | Hamming < 10 | Hash equality | Catches visually identical images that differ at byte level |
 | Database | MongoDB Atlas (hosted) | Local Docker | Zero infrastructure overhead; Atlas free tier is sufficient; no port management needed |
 
@@ -371,7 +387,8 @@ cd server && npx prisma db push
 | Variable | Description | Example |
 |---|---|---|
 | `DATABASE_URL` | MongoDB connection string (must include DB name) | `mongodb+srv://user:pass@cluster.net/aragonai` |
-| `AWS_REGION` | AWS region for S3 + Rekognition | `us-east-1` |
+| `AWS_REGION` | AWS region for S3 | `eu-north-1` |
+| `AWS_REKOGNITION_REGION` | AWS region for Rekognition (must support the service) | `eu-west-1` |
 | `AWS_ACCESS_KEY_ID` | IAM access key | `AKIA...` |
 | `AWS_SECRET_ACCESS_KEY` | IAM secret key | `...` |
 | `AWS_BUCKET_NAME` | S3 bucket for image storage | `my-images-bucket` |
@@ -389,12 +406,24 @@ cd server && npx prisma db push
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/images/upload` | Upload a single image file (`multipart/form-data`, field: `file`) |
+| `POST` | `/images/upload` | Upload a **single** image (`multipart/form-data`, field: `file`) |
+| `POST` | `/images/upload-bulk` | Upload **up to 50 images** at once (`multipart/form-data`, field: `files[]`) |
 | `GET` | `/images` | List all images (accepted + rejected), newest first |
 | `GET` | `/images/accepted` | List only accepted images |
 | `GET` | `/images/rejected` | List only rejected images |
 | `GET` | `/images/:id` | Get single image by ID |
 | `DELETE` | `/images/:id` | Delete an image record |
+
+### Bulk Upload Request
+
+```bash
+curl -X POST http://localhost:3001/images/upload-bulk \
+  -F "files=@photo1.jpg" \
+  -F "files=@photo2.png" \
+  -F "files=@group.jpg"
+```
+
+Returns an array of image records (same shape as single upload), one per input file, in the same order.
 
 ### Upload Response (ACCEPTED)
 
@@ -465,13 +494,21 @@ Use these in your Loom walkthrough to demonstrate each pipeline gate:
 | Upload a slightly resized/re-saved copy of an accepted image | REJECTED — perceptual hash catches it |
 | Upload visually different images | Both ACCEPTED |
 
-### Face Detection (Steps 7)
+### Face Detection (Step 6)
 | Test | Expected |
 |---|---|
 | Upload a clear single-face portrait | ACCEPTED |
 | Upload a landscape/object photo (no person) | REJECTED — "No face detected in the image." |
-| Upload a group photo (2+ people) | REJECTED — "Multiple faces detected." |
-| Upload a photo where face is very small / distant | REJECTED — "Detected face is too small." |
+| Upload a group photo (2+ people) | REJECTED — "Multiple faces detected (N). Only single-face images are allowed." |
+| Upload a photo where face is very small / distant | REJECTED — "Detected face is too small. Move closer to the camera." |
+
+### Bulk Upload
+| Test | Expected |
+|---|---|
+| Drop 10 images at once (mix of valid + invalid) | All appear instantly; invalid rejected client-side; valid show "Ready" badge |
+| Click Upload with 5 valid images | Single POST to `/images/upload-bulk`; animated progress bar; all 5 cards update simultaneously |
+| Upload same image twice in same batch | First accepted; second rejected as duplicate |
+| Upload 0 valid images (all client-rejected) | Upload button disabled |
 
 ### Happy Path End-to-End
 | Test | Expected |

@@ -5,13 +5,14 @@ import {
   Delete,
   Param,
   UploadedFile,
+  UploadedFiles,
   UseInterceptors,
   HttpCode,
   HttpStatus,
   ParseUUIDPipe,
   NotFoundException,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { ImagesService } from './images.service';
 import type { RawUpload } from '../../common/types/image.types';
@@ -31,6 +32,19 @@ export class ImagesController {
       size: file.size,
     };
     return this.imagesService.upload(raw);
+  }
+
+  @Post('upload-bulk')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(FilesInterceptor('files', 50, { storage: memoryStorage() }))
+  uploadBulk(@UploadedFiles() files: Express.Multer.File[]) {
+    const raws: RawUpload[] = files.map((f) => ({
+      originalname: f.originalname,
+      mimetype: f.mimetype,
+      buffer: f.buffer,
+      size: f.size,
+    }));
+    return this.imagesService.uploadBulk(raws);
   }
 
   @Get()

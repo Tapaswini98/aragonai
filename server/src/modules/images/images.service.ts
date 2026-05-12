@@ -16,10 +16,14 @@ export class ImagesService {
     private readonly storage: StorageService,
   ) {}
 
-  // ─── Upload Pipeline ────────────────────────────────────────────────────────
+
+  async uploadBulk(files: RawUpload[]): Promise<Image[]> {
+    return Promise.all(files.map((f) => this.upload(f)));
+  }
+
 
   async upload(file: RawUpload): Promise<Image> {
-    // Step 1 + 2 + 3 + 4: validate format, convert, check resolution & blur
+    // Step 1–4: validate format, convert HEIC, check resolution & blur
     const processed = await this.processing.process(file);
     if (!processed.ok) {
       return this.reject(file, processed.reason);
@@ -31,19 +35,19 @@ export class ImagesService {
     const duplicateReason = await this.checkSimilarity(hash);
     if (duplicateReason) return this.reject(file, duplicateReason, mimetype, buffer.length);
 
-    // Step 6: upload to S3
+    // Step 6: face validation from buffer (before S3 — rejected images never stored)
+    const faceIssue = await this.storage.detectFaceIssueFromBuffer(buffer);
+    if (faceIssue) return this.reject(file, faceIssue, mimetype, buffer.length);
+
+    // Step 7: upload to S3
     let url: string;
     try {
-      url = await this.storage.upload(buffer, file.originalname, mimetype);
+      const result = await this.storage.upload(buffer, file.originalname, mimetype);
+      url = result.url;
     } catch (err: any) {
       this.logger.error(`S3 upload failed: ${err.message}`);
       return this.reject(file, `Storage error: ${err.message}`, mimetype, buffer.length);
     }
-
-    // Step 7: face validation via Rekognition
-    const s3Key = this.storage.s3Key(file.originalname);
-    const faceIssue = await this.storage.detectFaceIssue(process.env.AWS_BUCKET_NAME!, s3Key);
-    if (faceIssue) return this.reject(file, faceIssue, mimetype, buffer.length);
 
     // Step 8: persist accepted record
     return this.prisma.image.create({

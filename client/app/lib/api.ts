@@ -13,6 +13,17 @@ export async function uploadImage(file: File): Promise<ServerImage> {
   return res.json() as Promise<ServerImage>;
 }
 
+export async function uploadBulkImages(files: File[]): Promise<ServerImage[]> {
+  const body = new FormData();
+  files.forEach((f) => body.append('files', f));
+  const res = await fetch(`${API}/images/upload-bulk`, { method: 'POST', body });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.message ?? `Bulk upload failed (${res.status})`);
+  }
+  return res.json() as Promise<ServerImage[]>;
+}
+
 export async function fetchImages(): Promise<ServerImage[]> {
   const res = await fetch(`${API}/images`);
   if (!res.ok) throw new Error('Failed to fetch images');

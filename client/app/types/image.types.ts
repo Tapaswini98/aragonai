@@ -1,5 +1,6 @@
 export type ImageStatus = 'ACCEPTED' | 'REJECTED';
 export type UploadPhase = 'idle' | 'uploading' | 'done';
+export type UploadState = 'pending' | 'uploading' | 'done' | 'error';
 
 export interface ServerImage {
   id: string;
@@ -18,4 +19,5 @@ export interface UploadEntry {
   clientStatus: ImageStatus;
   clientReason?: string;
   serverResult?: ServerImage;
+  uploadState?: UploadState;
 }
