@@ -1,0 +1,50 @@
+version: '3.8'
+
+# ─── AragonAI — Local Development Database ─────────────────────────────────
+#
+# Starts a single-node MongoDB 7 replica set.
+# Prisma's MongoDB connector requires a replica set to support multi-document
+# transactions and change streams, even for local development.
+#
+# Usage:
+#   docker compose up -d          # start in background
+#   docker compose down           # stop (keeps volume)
+#   docker compose down -v        # stop AND wipe the data volume
+# ────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ── Primary MongoDB node ──────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7
+    container_name: aragonai-mongo
+    # Start mongod with replica-set mode enabled
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping').ok", "--quiet"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── One-shot replica-set initialiser ─────────────────────────────────────
+  # Runs once after the MongoDB node is healthy and calls rs.initiate().
+  # After that the container exits (restart: on-failure keeps it dormant).
+  mongo-init:
+    image: mongo:7
+    container_name: aragonai-mongo-init
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    command: >
+      mongosh --host mongodb:27017 --eval
+      "try { rs.status() } catch(e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'localhost:27017' }] }) }"
+    restart: on-failure
+
+volumes:
+  mongo_data:
+    driver: local
